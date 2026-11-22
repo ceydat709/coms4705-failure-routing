@@ -1,0 +1,5 @@
+# Install vLLM separately (see README): it pins its own PyTorch version.
+transformers
+datasets
+math-verify[antlr4_13_2]
+pytest
