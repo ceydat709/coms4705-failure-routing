@@ -181,3 +181,37 @@ def test_kl_is_zero_against_itself_and_positive_otherwise():
     assert torch.allclose(sequence_losses(lp, lp, lp, zero_adv, mask, beta=1.0), torch.zeros(1))
     ref = torch.log(torch.tensor([[0.25, 0.5]]))
     assert sequence_losses(lp, lp, ref, zero_adv, mask, beta=1.0).item() > 0
+
+
+def test_unrouted_adapter_gets_no_gradient_at_all():
+    """If nothing in the batch is routed to F, F is skipped (grad None), so the
+    optimizer leaves it untouched instead of applying momentum from a zero grad."""
+    model = tiny_model()
+    ids, attn, P = batch(B=4)
+    S, F = attach_adapters(model, width=8)
+    nonzero_adapters(model)
+    lp = token_logprobs(model, ids, attn, P)
+    losses = sequence_losses(lp, lp.detach(), None, torch.tensor([1.0, -1.0, 1.0, -1.0]),
+                             torch.ones(4, ids.shape[1] - P))
+    mS, mF = routing_masks(torch.tensor([True] * 4), "outcome")
+    routed_backward(losses, mS, mF, 4, S, F)
+    assert all(p.grad is None for p in F)
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in S)
+
+
+def test_stop_tokens_include_im_end():
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from transformers import PreTrainedTokenizerFast
+    from tokenizers import Tokenizer, models
+    vocab = {"a": 0, "<|endoftext|>": 1, "<|im_end|>": 2, "[UNK]": 3}
+    tok = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(models.WordLevel(vocab, unk_token="[UNK]")),
+                                  unk_token="[UNK]", eos_token="<|endoftext|>", pad_token="<|endoftext|>")
+    from train_grpo import eos_ids
+    from eval_baseline import stop_ids
+
+    class M:  # minimal stand-in with a base-model-style generation config
+        class generation_config:
+            eos_token_id = 1
+    assert eos_ids(tok, M) == [1, 2]
+    assert stop_ids(tok) == [2]

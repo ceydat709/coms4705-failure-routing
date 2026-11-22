@@ -112,10 +112,10 @@ def routed_backward(seq_losses, m_S, m_F, n_total, S_params, F_params):
     loss_S = (seq_losses * m_S).sum() / n_total
     loss_F = (seq_losses * m_F).sum() / n_total
     targets = [(loss_S, S_params), (loss_F, F_params)]
-    for i, (loss, params) in enumerate(targets):
-        if not loss.requires_grad:
-            continue
-        grads = torch.autograd.grad(loss, params, retain_graph=(i == 0), allow_unused=True)
+    active = [(loss, params) for (loss, params), m in zip(targets, (m_S, m_F))
+              if loss.requires_grad and m.sum() > 0]  # skip an adapter with nothing routed to it
+    for i, (loss, params) in enumerate(active):
+        grads = torch.autograd.grad(loss, params, retain_graph=(i < len(active) - 1), allow_unused=True)
         for p, g in zip(params, grads):
             if g is None:
                 continue

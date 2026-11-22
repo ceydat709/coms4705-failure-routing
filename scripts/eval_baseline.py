@@ -73,6 +73,13 @@ def pick_dtype():
     return "float16"
 
 
+def stop_ids(tok):
+    """The base model's config only stops on <|endoftext|>, but with the chat
+    template it ends its turn with <|im_end|>, so stop on that too."""
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    return [im_end] if isinstance(im_end, int) and im_end != tok.unk_token_id else []
+
+
 def generate_vllm(args, prompts, dtype):
     from vllm import LLM, SamplingParams
 
@@ -84,7 +91,9 @@ def generate_vllm(args, prompts, dtype):
         tensor_parallel_size=args.tensor_parallel_size,
         seed=args.seed,
     )
+    tok = llm.get_tokenizer()
     params = SamplingParams(
+        stop_token_ids=stop_ids(tok),
         n=args.n_samples,
         temperature=args.temperature,
         top_p=1.0,
@@ -121,6 +130,7 @@ def generate_hf(args, prompts, dtype):
                 max_new_tokens=args.max_new_tokens,
                 num_return_sequences=args.n_samples,
                 pad_token_id=tok.pad_token_id,
+                eos_token_id=sorted(set(stop_ids(tok)) | {tok.eos_token_id}),
             )
         new_tokens = out[:, enc["input_ids"].shape[1] :]
         texts = tok.batch_decode(new_tokens, skip_special_tokens=True)

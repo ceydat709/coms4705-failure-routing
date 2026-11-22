@@ -68,6 +68,11 @@ def eos_ids(tokenizer, model):
         ids.update(gen_eos)
     if tokenizer.eos_token_id is not None:
         ids.add(tokenizer.eos_token_id)
+    # The base model's config only stops on <|endoftext|>, but with the chat template
+    # it ends its turn with <|im_end|>. Without this, generation runs on past the answer.
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    if isinstance(im_end, int) and im_end != tokenizer.unk_token_id:
+        ids.add(im_end)
     return sorted(ids)
 
 
@@ -84,6 +89,7 @@ def rollout(model, tokenizer, prompts, group_size, max_new_tokens, temperature):
         max_new_tokens=max_new_tokens,
         num_return_sequences=group_size,
         pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=eos_ids(tokenizer, model),
     )
     prompt_len = enc["input_ids"].shape[1]
     prompt_mask = enc["attention_mask"].repeat_interleave(group_size, dim=0)
@@ -184,37 +190,42 @@ def main():
         m_S, m_F = routing_masks(correct, args.mode, generator=route_gen)
         N = len(texts)
 
-        # ----- old and reference log-probs (no grad) -----
-        model.eval()
-        old_lp, ref_lp = [], []
-        with torch.no_grad():
-            for i in range(0, N, args.micro_batch):
-                sl = slice(i, i + args.micro_batch)
-                set_adapter_scales(model, 1.0, 1.0)
-                old_lp.append(token_logprobs(model, input_ids[sl], attn[sl], prompt_len))
-                if args.beta > 0:
-                    set_adapter_scales(model, 0.0, 0.0)  # base model = reference
-                    ref_lp.append(token_logprobs(model, input_ids[sl], attn[sl], prompt_len))
+        # Micro-batches (half a group each) whose group got all-equal rewards have zero
+        # advantage and no learning signal, so we skip them entirely (this also skips
+        # their small KL term). This saves a lot of compute on easy and hard problems.
+        chunks = [slice(i, i + args.micro_batch) for i in range(0, N, args.micro_batch)]
+        chunks = [sl for sl in chunks if adv[sl].abs().sum() > 0]
+
+        # ----- reference log-probs (base model, no grad) -----
+        ref_lp = {}
+        if args.beta > 0:
+            model.eval()
+            set_adapter_scales(model, 0.0, 0.0)
+            with torch.no_grad():
+                for sl in chunks:
+                    ref_lp[sl.start] = token_logprobs(model, input_ids[sl], attn[sl], prompt_len)
         set_adapter_scales(model, 1.0, 1.0)
 
         # ----- policy update with routing -----
+        # One update per batch of rollouts, so the rollout policy equals the current
+        # policy and old log-probs are just the detached current ones (ratio = 1).
         model.train()
         opt.zero_grad(set_to_none=True)
         loss_S_total = loss_F_total = 0.0
-        for j, i in enumerate(range(0, N, args.micro_batch)):
-            sl = slice(i, i + args.micro_batch)
-            if adv[sl].abs().sum() == 0 and args.beta == 0:
-                continue  # no learning signal in this micro-batch
+        for sl in chunks:
             lp = token_logprobs(model, input_ids[sl], attn[sl], prompt_len)
             losses = sequence_losses(
-                lp, old_lp[j], ref_lp[j] if ref_lp else None, adv[sl].to(lp.device),
+                lp, lp.detach(), ref_lp.get(sl.start), adv[sl].to(lp.device),
                 gen_mask[sl], clip_eps=args.clip_eps, beta=args.beta)
             lS, lF = routed_backward(losses, m_S[sl].to(lp.device), m_F[sl].to(lp.device), N,
                                      S_params, F_params)
             loss_S_total += lS
             loss_F_total += lF
-        grad_norm = torch.nn.utils.clip_grad_norm_(S_params + F_params, 1.0).item()
-        opt.step()
+        # Clip each adapter separately so a large F gradient cannot shrink S's update.
+        gnorm_S = torch.nn.utils.clip_grad_norm_(S_params, 1.0).item()
+        gnorm_F = torch.nn.utils.clip_grad_norm_(F_params, 1.0).item()
+        if chunks:
+            opt.step()
 
         gen_lens = gen_mask.sum(dim=1).float()
         record = {
@@ -227,7 +238,9 @@ def main():
             "frac_to_S": m_S.mean().item(),
             "loss_S": loss_S_total,
             "loss_F": loss_F_total,
-            "grad_norm": grad_norm,
+            "grad_norm_S": gnorm_S,
+            "grad_norm_F": gnorm_F,
+            "frac_with_signal": sum(min(sl.stop, N) - sl.start for sl in chunks) / N,
             "seconds": round(time.time() - t0, 1),
         }
         log_f.write(json.dumps(record) + "\n")
@@ -238,7 +251,7 @@ def main():
                                     "correct": correct[: args.group_size].tolist()}) + "\n")
         samples_f.flush()
         print(f"step {step:4d} | reward {record['reward']:.3f} | valid {record['format_validity']:.2f} | "
-              f"len {record['mean_gen_tokens']:.0f} | gnorm {grad_norm:.3f} | {record['seconds']}s", flush=True)
+              f"len {record['mean_gen_tokens']:.0f} | signal {record['frac_with_signal']:.2f} | {record['seconds']}s", flush=True)
 
         if step % args.save_every == 0 or step == args.steps:
             torch.save(adapter_state_dict(model), os.path.join(out_dir, f"adapters_step{step}.pt"))
