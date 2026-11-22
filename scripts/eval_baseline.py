@@ -144,8 +144,8 @@ def main():
     p.add_argument("--hf_batch_size", type=int, default=4)
     p.add_argument("--gpu_memory_utilization", type=float, default=0.85)
     p.add_argument("--tensor_parallel_size", type=int, default=1)
-    p.add_argument("--dtype", choices=["auto", "float16", "bfloat16"], default="auto",
-                   help="auto picks bfloat16 on A100/L4 and float16 on T4")
+    p.add_argument("--dtype", choices=["auto", "float16", "bfloat16", "float32"], default="auto",
+                   help="auto picks bfloat16 on A100/L4 and float16 on T4; float32 is slower but exact")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", required=True, help="output folder name under results/")
     args = p.parse_args()
