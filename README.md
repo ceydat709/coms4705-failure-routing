@@ -13,7 +13,12 @@ success adapter. Ceyda Topcu and Jake Li.
 | `src/checker.py` | Answer checking with Hugging Face `math-verify` (the training reward) |
 | `src/metrics.py` | pass@k (unbiased estimator), confident-error rate, format validity |
 | `scripts/eval_baseline.py` | Samples 16 solutions per problem and scores them |
-| `tests/` | Sanity tests for the checker and metrics |
+| `src/adapters.py` | Success (S) and failure (F) adapters attached to every block of a frozen model |
+| `src/grpo.py` | GRPO loss, group advantages, and gradient routing (modes: grpo, outcome, random, psr, nsr) |
+| `scripts/train_grpo.py` | Trains the adapters with GRPO and routing; logs to `runs/<name>/` |
+| `scripts/eval_adapters.py` | Evaluates a trained run with each adapter switched on/off (the ablation) |
+| `scripts/plot_training.py` | Plots reward, format validity, and generation length over training |
+| `tests/` | Tests for the checker, metrics, adapters, GRPO loss and routing |
 | `kaggle_setup.ipynb` | Notebook that runs everything on Kaggle |
 
 Code we did not write: `math-verify` (answer checking), `vllm` (fast sampling),
@@ -22,22 +27,18 @@ and `tests/` is ours.
 
 ## Setup, step by step
 
-### 1. Put the code on GitHub (one person, once)
+### 1. Get the code
 
-1. Go to github.com → **New repository**. Name it `failure-routing`, set it to
-   **Private**, and create it without a README.
-2. Open the repository page and click **uploading an existing file**. Drag in
-   everything from this folder, including the `src`, `scripts` and `tests`
-   folders, then click **Commit changes**.
-3. Go to **Settings → Collaborators → Add people** and add your teammate.
+The code lives at https://github.com/ceydat709/coms4705-failure-routing.
+Ask Ceyda to add you under **Settings → Collaborators** so you can push.
 
-### 2. Make a GitHub token so Kaggle can read the private repo
+### 2. (Only if the repo is made private) Make a GitHub token for Kaggle
 
 1. GitHub → your profile picture → **Settings → Developer settings →
    Personal access tokens → Fine-grained tokens → Generate new token**.
 2. Under **Repository access**, choose **Only select repositories** and pick
-   `failure-routing`. Under **Permissions → Contents**, choose **Read-only**.
-3. Generate it and copy the token. You won't see it again.
+   `coms4705-failure-routing`. Under **Permissions → Contents**, choose **Read-only**.
+3. Generate it, copy it, and add it in Kaggle as a secret named `GITHUB_TOKEN`.
 
 ### 3. Set up Kaggle (each person)
 
@@ -51,10 +52,8 @@ and `tests/` is ours.
    upload `kaggle_setup.ipynb`.
 2. In the right sidebar under **Session options**, set
    **Accelerator = GPU T4 x2** and **Internet = On**.
-3. **Add-ons → Secrets → Add a new secret**: name it `GITHUB_TOKEN`, paste the
-   token, and switch it on for this notebook.
-4. In the second code cell, replace `YOUR_GITHUB_USERNAME` with the username
-   that owns the repo.
+3. Only if the repo is private: **Add-ons → Secrets → Add a new secret**,
+   name it `GITHUB_TOKEN`, paste the token, and switch it on for this notebook.
 
 ### 5. Run it
 
@@ -83,3 +82,25 @@ so the run continues after you close the tab. Each full run is 500 problems ×
   profile. Stop the session when you're done to avoid wasting hours.
 - **Moving to GCP later:** `git clone` the same repo on the VM, then run the
   same commands without the Kaggle-specific cells.
+
+## Training (GRPO with routing)
+
+```bash
+# quick check that training runs (a few minutes)
+python scripts/train_grpo.py --mode outcome --steps 3 --prompts_per_step 2 --group_size 4 \
+    --max_new_tokens 256 --micro_batch 2 --name debug
+
+# real runs (L4/A100 on GCP)
+python scripts/train_grpo.py --mode grpo    --steps 50 --name grpo_seed0
+python scripts/train_grpo.py --mode outcome --steps 50 --name outcome_seed0
+
+# ablation: switch each adapter off
+python scripts/eval_adapters.py --run runs/outcome_seed0 --split dev --limit 100 --n_samples 8
+
+# training curves
+python scripts/plot_training.py runs/grpo_seed0 runs/outcome_seed0 --out figures/training.png
+```
+
+Routing modes: `grpo` (both adapters get every update), `outcome` (wrong answers update
+only F, right answers only S), `random` (labels shuffled within the batch, the control),
+`psr`, `nsr`. On a T4 the script trains in float32; on A100/L4 it uses bfloat16.

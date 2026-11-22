@@ -6,3 +6,7 @@ checkpoints/
 *.safetensors
 *.bin
 .ipynb_checkpoints/
+runs/*/adapters_*.pt
+*.pt
+figures/test.png
+logs/
